@@ -1,4 +1,4 @@
-vcl 4.0;
+vcl 4.1;
 
 import std;
 # The minimal Varnish version is 4.0
@@ -19,9 +19,6 @@ acl purge {
 }
 
 sub vcl_recv {
-     # send all traffic to the director:
-    set req.backend_hint = d.backend();
-
     if (req.method == "PURGE") {
 
         if (client.ip !~ purge) {
