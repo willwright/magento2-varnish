@@ -1,15 +1,16 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
-MAINTAINER wwright <wwrig@guidance.com>
+MAINTAINER wwright <will@magesmith.com>
 
 # disable interactive functions
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-apt-get install -y curl apt-transport-https telnet
+apt-get install -y curl apt-transport-https telnet curl gnupg
 
-#RUN curl https://repo.varnish-cache.org/GPG-key.txt | apt-key add -
-#RUN echo "deb https://repo.varnish-cache.org/ubuntu/ trusty varnish-4.1" >> /etc/apt/sources.list.d/varnish-cache.list
+RUN curl -L https://packagecloud.io/varnishcache/varnish63/gpgkey | apt-key add -
+RUN echo "deb https://packagecloud.io/varnishcache/varnish63/ubuntu/ bionic main" >> /etc/apt/sources.list.d/varnishcache_varnish63.list
+RUN echo "deb-src https://packagecloud.io/varnishcache/varnish63/ubuntu/ bionic main" >> /etc/apt/sources.list.d/varnishcache_varnish63.list
 RUN apt-get update && \
 apt-get install -y varnish
 
