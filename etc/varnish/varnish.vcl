@@ -1,44 +1,46 @@
+# VCL version 5.0 is not supported so it should be 4.0 even though actually used Varnish version is 6
 vcl 4.0;
 
 import std;
-# The minimal Varnish version is 4.0
+# The minimal Varnish version is 6.0
 # For SSL offloading, pass the following header in your proxy server or load balancer: 'X-Forwarded-Proto: https'
 
 backend default {
-    .host = "web";
+    .host = "varnish";
     .port = "80";
-    .connect_timeout = 1600s;
-    .first_byte_timeout = 1600s;
-    .between_bytes_timeout = 1600s;
-    .max_connections = 20000;
+    .first_byte_timeout = 600s;
+    .probe = {
+        .url = "/pub/health_check.php";
+        .timeout = 2s;
+        .interval = 5s;
+        .window = 10;
+        .threshold = 5;
+   }
 }
 
 acl purge {
     "localhost";
-    "127.0.0.1";
 }
 
 sub vcl_recv {
     if (req.method == "PURGE") {
-
         if (client.ip !~ purge) {
             return (synth(405, "Method not allowed"));
         }
-        if (!req.http.X-Magento-Tags-Pattern && !req.http.X-Url) {
-            return (synth(400, "X-Magento-Tags-Pattern OR X-Url header is required"));
+        # To use the X-Pool header for purging varnish during automated deployments, make sure the X-Pool header
+        # has been added to the response in your backend server config. This is used, for example, by the
+        # capistrano-magento2 gem for purging old content from varnish during it's deploy routine.
+        if (!req.http.X-Magento-Tags-Pattern && !req.http.X-Pool) {
+            return (synth(400, "X-Magento-Tags-Pattern or X-Pool header required"));
         }
         if (req.http.X-Magento-Tags-Pattern) {
-            ban("obj.http.X-Magento-Tags ~ " + req.http.X-Magento-Tags-Pattern);
+          ban("obj.http.X-Magento-Tags ~ " + req.http.X-Magento-Tags-Pattern);
         }
-        if (req.http.X-Url) {
-            ban("obj.http.X-Url ~ " + req.http.X-Url);
+        if (req.http.X-Pool) {
+          ban("obj.http.X-Pool ~ " + req.http.X-Pool);
         }
-
         return (synth(200, "Purged"));
     }
-
-    # Bypass Varnish
-    #return (pass);
 
     if (req.method != "GET" &&
         req.method != "HEAD" &&
@@ -56,10 +58,18 @@ sub vcl_recv {
         return (pass);
     }
 
-    # Bypass shopping cart, checkout, search, and blog requests
-    if (req.url ~ "/checkout" || req.url ~ "/catalogsearch" || req.url ~ "/blog") {
+    # Bypass shopping cart, checkout and search requests
+    if (req.url ~ "/checkout" || req.url ~ "/catalogsearch") {
         return (pass);
     }
+
+    # Bypass health check requests
+    if (req.url ~ "/pub/health_check.php") {
+        return (pass);
+    }
+
+    # Set initial grace period usage status
+    set req.http.grace = "none";
 
     # normalize url in case of leading HTTP scheme and domain
     set req.url = regsub(req.url, "^http[s]?://", "");
@@ -77,21 +87,26 @@ sub vcl_recv {
         } elsif (req.http.Accept-Encoding ~ "deflate" && req.http.user-agent !~ "MSIE") {
             set req.http.Accept-Encoding = "deflate";
         } else {
-            # unkown algorithm
+            # unknown algorithm
             unset req.http.Accept-Encoding;
         }
     }
 
-    # Remove Google gclid parameters to minimize the cache objects
-    set req.url = regsuball(req.url,"\?gclid=[^&]+$",""); # strips when QS = "?gclid=AAA"
-    set req.url = regsuball(req.url,"\?gclid=[^&]+&","?"); # strips when QS = "?gclid=AAA&foo=bar"
-    set req.url = regsuball(req.url,"&gclid=[^&]+",""); # strips when QS = "?foo=bar&gclid=AAA" or QS = "?foo=bar&gclid=AAA&bar=baz"
+    # Remove all marketing get parameters to minimize the cache objects
+    if (req.url ~ "(\?|&)(gclid|cx|ie|cof|siteurl|zanpid|origin|fbclid|mc_[a-z]+|utm_[a-z]+|_bta_[a-z]+)=") {
+        set req.url = regsuball(req.url, "(gclid|cx|ie|cof|siteurl|zanpid|origin|fbclid|mc_[a-z]+|utm_[a-z]+|_bta_[a-z]+)=[-_A-z0-9+()%.]+&?", "");
+        set req.url = regsub(req.url, "[?|&]+$", "");
+    }
 
-    # static files are always cacheable. remove SSL flag and cookie
-    if (req.url ~ "^/(pub/)?(media|static)/.*\.(ico|css|js|jpg|jpeg|png|gif|tiff|bmp|mp3|ogg|svg|swf|woff|woff2|eot|ttf|otf)$") {
-        unset req.http.Https;
-        unset req.http.X-Forwarded-Proto;
-        unset req.http.Cookie;
+    # Static files caching
+    if (req.url ~ "^/(pub/)?(media|static)/") {
+        # Static files should not be cached by default
+        return (pass);
+
+        # But if you use a few locales and don't use CDN you can enable caching static files by commenting previous line (#return (pass);) and uncommenting next 3 lines
+        #unset req.http.Https;
+        #unset req.http.X-Forwarded-Proto;
+        #unset req.http.Cookie;
     }
 
     return (hash);
@@ -113,14 +128,26 @@ sub vcl_hash {
     if (req.http.X-Forwarded-Proto) {
         hash_data(req.http.X-Forwarded-Proto);
     }
+    
 
-    #  Ajax requests should not be cached to the same key as regular pages.
-    if (req.http.X-Requested-With) {
-        hash_data(req.http.X-Requested-With);
+    if (req.url ~ "/graphql") {
+        call process_graphql_headers;
+    }
+}
+
+sub process_graphql_headers {
+    if (req.http.Store) {
+        hash_data(req.http.Store);
+    }
+    if (req.http.Content-Currency) {
+        hash_data(req.http.Content-Currency);
     }
 }
 
 sub vcl_backend_response {
+
+    set beresp.grace = 3d;
+
     if (beresp.http.content-type ~ "text") {
         set beresp.do_esi = true;
     }
@@ -129,8 +156,9 @@ sub vcl_backend_response {
         set beresp.do_gzip = true;
     }
 
-    # for an ability to ban cache records by URL
-    set beresp.http.X-Url = bereq.url;
+    if (beresp.http.X-Magento-Debug) {
+        set beresp.http.X-Magento-Cache-Control = beresp.http.Cache-Control;
+    }
 
     # cache only successfully responses and 404s
     if (beresp.status != 200 && beresp.status != 404) {
@@ -143,47 +171,43 @@ sub vcl_backend_response {
         return (deliver);
     }
 
-    if (beresp.http.X-Magento-Debug) {
-        #set beresp.http.X-Magento-Cache-Control = beresp.http.Cache-Control;
-    }
-
     # validate if we need to cache it and prevent from setting cookie
-    # images, css and js are cacheable by default so we have to remove cookie also
     if (beresp.ttl > 0s && (bereq.method == "GET" || bereq.method == "HEAD")) {
         unset beresp.http.set-cookie;
-        if (bereq.url !~ "\.(ico|css|js|jpg|jpeg|png|gif|tiff|bmp|gz|tgz|bz2|tbz|mp3|ogg|svg|swf|woff|woff2|eot|ttf|otf)(\?|$)") {
-            set beresp.http.Pragma = "no-cache";
-            set beresp.http.Expires = "-1";
-            set beresp.http.Cache-Control = "no-store, no-cache, must-revalidate, max-age=0";
-            set beresp.grace = 1m;
-        }
     }
 
    # If page is not cacheable then bypass varnish for 2 minutes as Hit-For-Pass
    if (beresp.ttl <= 0s ||
-        beresp.http.Surrogate-control ~ "no-store" ||
-        (!beresp.http.Surrogate-Control && beresp.http.Vary == "*")) {
+       beresp.http.Surrogate-control ~ "no-store" ||
+       (!beresp.http.Surrogate-Control &&
+       beresp.http.Cache-Control ~ "no-cache|no-store") ||
+       beresp.http.Vary == "*") {
         # Mark as Hit-For-Pass for the next 2 minutes
-        #set beresp.ttl = 120s;
-        #set beresp.uncacheable = true;
+        set beresp.ttl = 120s;
+        set beresp.uncacheable = true;
     }
+
     return (deliver);
 }
 
 sub vcl_deliver {
-    #if (resp.http.X-Magento-Debug) {
+    if (resp.http.X-Magento-Debug) {
         if (resp.http.x-varnish ~ " ") {
             set resp.http.X-Magento-Cache-Debug = "HIT";
+            set resp.http.Grace = req.http.grace;
         } else {
             set resp.http.X-Magento-Cache-Debug = "MISS";
         }
-    #} else {
+    } else {
         unset resp.http.Age;
-    #}
+    }
 
-    # We remove resp.http.X-Url HTTP header fields,
-    # because the client does not need them
-    unset resp.http.X-Url;
+    # Not letting browser to cache non-static files.
+    if (resp.http.Cache-Control !~ "private" && req.url !~ "^/(pub/)?(media|static)/") {
+        set resp.http.Pragma = "no-cache";
+        set resp.http.Expires = "-1";
+        set resp.http.Cache-Control = "no-store, no-cache, must-revalidate, max-age=0";
+    }
 
     unset resp.http.X-Magento-Debug;
     unset resp.http.X-Magento-Tags;
@@ -194,30 +218,23 @@ sub vcl_deliver {
     unset resp.http.Link;
 }
 
-sub vcl_backend_error {
-    return(retry);
-}
-
-sub vcl_synth {
-    if (resp.status == 503) {
-        synthetic({"
-<!doctype html>
-<html xmlns="http://www.w3.org/1999/xhtml" >
-    <head>
-        <title>ERROR 500</title>
-        <style media="screen" type="text/css">
-        </style>
-    </head>
-    <body class="error500">
-        <main class="page-main">
-            <h5>Error 500</h5>
-            <h1>Hang on,</h1>
-            <h2>something went wrong.</h2>
-            <p>It's not you, it's us. Please try again later.</p>
-        </main>
-    </body>
-</html>
-        "});
+sub vcl_hit {
+    if (obj.ttl >= 0s) {
+        # Hit within TTL period
+        return (deliver);
+    }
+    if (std.healthy(req.backend_hint)) {
+        if (obj.ttl + 300s > 0s) {
+            # Hit after TTL expiration, but within grace period
+            set req.http.grace = "normal (healthy server)";
+            return (deliver);
+        } else {
+            # Hit after TTL and grace expiration
+            return (restart);
+        }
+    } else {
+        # server is not healthy, retrieve from cache
+        set req.http.grace = "unlimited (unhealthy server)";
         return (deliver);
     }
 }

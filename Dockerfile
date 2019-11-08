@@ -1,6 +1,6 @@
 FROM ubuntu:18.04
 
-MAINTAINER wwright <will@magesmith.com>
+MAINTAINER Will Wright <will@magesmith.com>
 
 # disable interactive functions
 ARG DEBIAN_FRONTEND=noninteractive
