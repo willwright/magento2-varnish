@@ -19,5 +19,6 @@ apt-get install -y varnish
 #
 COPY etc/varnish/default.vcl /etc/varnish/default.vcl
 COPY etc/varnish/varnish.vcl /etc/varnish/varnish.vcl
+COPY etc/varnish/varnish-external-web.vcl /etc/varnish/varnish-external-web.vcl
 
 CMD ["/usr/sbin/varnishd","-F","-f","/etc/varnish/varnish.vcl","-s","malloc,2048M","-p","http_resp_hdr_len=90000","-p","thread_pool_min=5","-p","thread_pool_timeout=600","-p","http_max_hdr=200","-p","http_resp_size=9000k","-p","workspace_backend=9000k"]
